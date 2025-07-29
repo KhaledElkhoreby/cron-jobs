@@ -14,10 +14,15 @@ import { Task } from 'src/database/tasks';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { TasksService } from './tasks.service';
+import { TaskLog } from 'src/database/tasks/schemas/task-log.schema';
+import { TaskLogsService } from './task-logs.service';
 
 @Controller('tasks')
 export class TasksController {
-  constructor(private readonly tasksService: TasksService) {}
+  constructor(
+    private readonly tasksService: TasksService,
+    private readonly taskLogsService: TaskLogsService,
+  ) {}
 
   @Post()
   crete(@Body() createTaskDto: CreateTaskDto): Promise<Task> {
@@ -58,5 +63,20 @@ export class TasksController {
       throw new NotFoundException(`Task with id ${id} not found`);
     }
     return { message: `Task with id ${id} deleted successfully` };
+  }
+
+  // Task Logs Endpoints
+  @Get(':id/logs')
+  async getTaskLogs(@Param('id') id: string): Promise<TaskLog[]> {
+    const task = await this.tasksService.findTaskById(id);
+    if (!task) {
+      throw new NotFoundException(`Task with id ${id} not found`);
+    }
+    return this.taskLogsService.findLogsForTask(id);
+  }
+
+  @Get('logs/all')
+  async getAllTaskLogs(): Promise<TaskLog[]> {
+    return this.taskLogsService.findAllLogs();
   }
 }

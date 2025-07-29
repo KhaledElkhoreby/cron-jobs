@@ -3,6 +3,7 @@ import { SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
 import { Task, TaskStatus } from 'src/database/tasks';
 import { TasksRepository } from 'src/database/tasks/tasks.repository';
+import { TaskLogsService } from './task-logs.service';
 
 @Injectable()
 export class TasksService implements OnModuleInit {
@@ -12,6 +13,7 @@ export class TasksService implements OnModuleInit {
   constructor(
     private tasksRepository: TasksRepository,
     private schedulerRegister: SchedulerRegistry,
+    private taskLogsService: TaskLogsService,
   ) {}
 
   async onModuleInit() {
@@ -139,12 +141,27 @@ export class TasksService implements OnModuleInit {
     const job = new CronJob(
       task.cronExpression,
       async () => {
-        this.logger.log(`Executing dynamic task "${task.name}" (${jobName})`);
+        const startTime = process.hrtime.bigint(); // Start timer for duration
 
+        this.logger.log(`Executing dynamic task "${task.name}" (${jobName})`);
         try {
           this.executeTaskAction(task);
           await this.updateTaskStatus(taskId, TaskStatus.COMPLETED);
+
+          const endTime = process.hrtime.bigint(); // End timer for duration
+          const durationMs = Number(endTime - startTime) / 1_000_000;
+
+          await this.taskLogsService.createLog(
+            taskId,
+            task.name,
+            TaskStatus.COMPLETED,
+            undefined,
+            durationMs,
+          );
         } catch (error) {
+          const endTime = process.hrtime.bigint(); // End timer for duration
+          const durationMs = Number(endTime - startTime) / 1_000_000;
+
           this.logger.error(
             `Error executing task "${task.name}" (${jobName}):`,
             error,
@@ -154,6 +171,15 @@ export class TasksService implements OnModuleInit {
             TaskStatus.FAILED,
             // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
             error?.message as unknown as string,
+          );
+
+          await this.taskLogsService.createLog(
+            taskId,
+            task.name,
+            TaskStatus.FAILED,
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+            error?.message as unknown as string,
+            durationMs,
           );
         }
       },
