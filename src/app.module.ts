@@ -8,9 +8,12 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { SeederService } from './seeder/seeder.service';
 import { TasksModule } from './tasks/tasks.module';
+import { WinstonModule } from 'nest-winston';
+import { winstonConfig } from 'config/winston.config';
 
 @Module({
   imports: [
+    WinstonModule.forRoot(winstonConfig),
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),
     ScheduleModule.forRoot(),
     MongooseModule.forRootAsync({
