@@ -1,14 +1,16 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
+import mongoose from 'mongoose';
 import { Task, TaskStatus } from 'src/database/tasks';
 import { TasksRepository } from 'src/database/tasks/tasks.repository';
 import { TaskLogsService } from './task-logs.service';
+import { CreateTaskDto } from './dto/create-task.dto';
+import { UpdateTaskDto } from './dto/update-task.dto';
 
 @Injectable()
 export class TasksService implements OnModuleInit {
   private readonly logger = new Logger(TasksService.name);
-  private readonly dynamicJobs = new Map<string, CronJob>();
 
   constructor(
     private tasksRepository: TasksRepository,
@@ -22,7 +24,7 @@ export class TasksService implements OnModuleInit {
 
   // --- Mongoose CRUD Operations for Tasks ---
 
-  async createTask(task: Partial<Task>): Promise<Task> {
+  async createTask(task: CreateTaskDto): Promise<Task> {
     const newTask = await this.tasksRepository._model.create(task);
     this.logger.log(`Created new task: ${newTask.name}`);
     this.scheduleDynamicTask(newTask);
@@ -37,7 +39,7 @@ export class TasksService implements OnModuleInit {
     return this.tasksRepository._model.findById(taskId).exec();
   }
 
-  async updateTask(id: string, update: Partial<Task>): Promise<Task | null> {
+  async updateTask(id: string, update: UpdateTaskDto): Promise<Task | null> {
     const updatedTask = await this.tasksRepository._model
       .findByIdAndUpdate(id, update, { new: true })
       .exec();
@@ -69,14 +71,18 @@ export class TasksService implements OnModuleInit {
     const jobName = `dynamic-task-${taskId}`;
     if (this.schedulerRegister.doesExist('cron', jobName)) {
       this.schedulerRegister.deleteCronJob(jobName);
-      this.dynamicJobs.delete(taskId);
       this.logger.log(`Stopped and deleted dynamic task: ${jobName}`);
+    } else if (this.schedulerRegister.doesExist('timeout', jobName)) {
+      this.schedulerRegister.deleteTimeout(jobName);
+      this.logger.log(
+        `Dynamic one-time task "${jobName}" stopped and removed.`,
+      );
     } else {
       this.logger.warn(`No dynamic task found with name: ${jobName} to stop.`);
     }
   }
 
-  private executeTaskAction(task: Task) {
+  private async executeTaskAction(task: Task) {
     switch (task.actionType) {
       case 'LOG_MESSAGE':
         this.logger.log(
@@ -88,10 +94,32 @@ export class TasksService implements OnModuleInit {
           `Task Action: Sending email to ${task.payload?.recipient} with message: ${task.payload?.message}`,
         );
         break;
-      case 'DB_CLEANUP':
-        this.logger.log(
-          `Task Action: Performing database cleanup for collection ${task.payload?.collectionName}`,
-        );
+      case 'WEBHOOK_CALL':
+        this.logger.log(`Task Action: Calling webhook ${task.payload?.url}`);
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+          const response = await fetch(task.payload.url, {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            method: task.payload.method || 'POST',
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            headers: task.payload.headers || {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(task.payload.body || {}),
+          });
+          if (!response.ok) {
+            throw new Error(
+              `Webhook call failed with status: ${response.status}`,
+            );
+          }
+          this.logger.log(
+            `Webhook call successful: ${response.status} ${response.statusText}`,
+          );
+        } catch (error) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          this.logger.error(`Webhook call failed: ${error.message}`);
+          throw error;
+        }
         break;
       default:
         this.logger.warn(
@@ -116,10 +144,7 @@ export class TasksService implements OnModuleInit {
     }
 
     try {
-      const currentTask = this.dynamicJobs.get(taskId);
-      if (currentTask) {
-        update.nextRunAt = currentTask.nextDates(1)[0]?.toJSDate();
-      }
+      //
     } catch (error: any) {
       this.logger.error(
         // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
@@ -138,66 +163,114 @@ export class TasksService implements OnModuleInit {
       this.stopDynamicTask(taskId);
     }
 
-    const job = new CronJob(
-      task.cronExpression,
-      async () => {
-        const startTime = process.hrtime.bigint(); // Start timer for duration
+    const taskCallback = async () => {
+      const startTime = process.hrtime.bigint(); // Start timer for duration
 
-        this.logger.log(`Executing dynamic task "${task.name}" (${jobName})`);
-        try {
-          this.executeTaskAction(task);
+      this.logger.log(`Executing dynamic task "${task.name}" (${jobName})`);
+      try {
+        this.executeTaskAction(task);
+        await this.updateTaskStatus(taskId, TaskStatus.COMPLETED);
+
+        // For one-time task, deactivate after completion
+        if (task.executionTime) {
+          await this.tasksRepository._model
+            .findByIdAndUpdate(new mongoose.Types.ObjectId(taskId), {
+              isActive: false,
+              status: TaskStatus.COMPLETED,
+            })
+            .exec();
+          this.stopDynamicTask(taskId);
+        } else {
           await this.updateTaskStatus(taskId, TaskStatus.COMPLETED);
-
-          const endTime = process.hrtime.bigint(); // End timer for duration
-          const durationMs = Number(endTime - startTime) / 1_000_000;
-
-          await this.taskLogsService.createLog(
-            taskId,
-            task.name,
-            TaskStatus.COMPLETED,
-            undefined,
-            durationMs,
-          );
-        } catch (error) {
-          const endTime = process.hrtime.bigint(); // End timer for duration
-          const durationMs = Number(endTime - startTime) / 1_000_000;
-
-          this.logger.error(
-            `Error executing task "${task.name}" (${jobName}):`,
-            error,
-          );
-          await this.updateTaskStatus(
-            taskId,
-            TaskStatus.FAILED,
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            error?.message as unknown as string,
-          );
-
-          await this.taskLogsService.createLog(
-            taskId,
-            task.name,
-            TaskStatus.FAILED,
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            error?.message as unknown as string,
-            durationMs,
-          );
         }
-      },
-      null,
-      true,
-      'Africa/Cairo',
-    );
 
-    this.schedulerRegister.addCronJob(jobName, job);
-    this.dynamicJobs.set(taskId, job);
-    this.logger.log(
-      `Scheduled dynamic task "${task.name}" (${jobName}) for "${task.cronExpression}"`,
-    );
+        const endTime = process.hrtime.bigint(); // End timer for duration
+        const durationMs = Number(endTime - startTime) / 1_000_000;
+
+        await this.taskLogsService.createLog(
+          taskId,
+          task.name,
+          TaskStatus.COMPLETED,
+          undefined,
+          durationMs,
+        );
+      } catch (error) {
+        const endTime = process.hrtime.bigint(); // End timer for duration
+        const durationMs = Number(endTime - startTime) / 1_000_000;
+
+        this.logger.error(
+          `Error executing task "${task.name}" (${jobName}):`,
+          error,
+        );
+        await this.updateTaskStatus(
+          taskId,
+          TaskStatus.FAILED,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          error?.message as unknown as string,
+        );
+
+        await this.taskLogsService.createLog(
+          taskId,
+          task.name,
+          TaskStatus.FAILED,
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          error?.message as unknown as string,
+          durationMs,
+        );
+
+        // For one-time task, deactivate after failure
+        if (task.executionTime) {
+          await this.tasksRepository._model
+            .findOneAndUpdate(new mongoose.Types.ObjectId(taskId), {
+              isActive: false,
+            })
+            .exec();
+        }
+      }
+    };
+
+    // Check if it's a cron job or a one-time task
+    if (task.cronExpression) {
+      const job = new CronJob(
+        task.cronExpression,
+        taskCallback,
+        null,
+        true,
+        task.timezone,
+      );
+      this.schedulerRegister.addCronJob(jobName, job);
+      this.logger.log(
+        `Scheduled dynamic task "${task.name}" (${jobName}) for "${task.cronExpression}"`,
+      );
+    } else if (task.executionTime) {
+      // Calculate delay in milliseconds
+      const delay =
+        new Date(task.executionTime).getTime() - new Date().getTime();
+      if (delay > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises
+        const timeout = setTimeout(taskCallback, delay);
+        this.schedulerRegister.addTimeout(jobName, timeout);
+        this.logger.log(
+          `Dynamic one-time task "${jobName}" scheduled to run at ${task.executionTime.toISOString()}`,
+        );
+      } else {
+        // If the time is in the past, execute immediately and deactivate
+        this.logger.warn(
+          `One-time task "${jobName}" execution time is in the past. Executing now.`,
+        );
+        void taskCallback();
+      }
+    }
+
+    // this.dynamicJobs.set(taskId, job);
   }
 
   async initializeDynamicTasks() {
     this.logger.log('Initializing dynamic tasks from database...');
-    const activeTasks = await this.tasksRepository.findAll({ isActive: true });
+    const activeTasks = await this.tasksRepository._model
+      .find({ isActive: true })
+      .sort({ priority: -1 })
+      .exec();
 
     for (const task of activeTasks) {
       this.scheduleDynamicTask(task);

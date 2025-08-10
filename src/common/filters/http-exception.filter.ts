@@ -8,7 +8,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
-import { Response } from 'express';
+import { Response, Request } from 'express';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -18,8 +18,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const { httpAdapter } = this.httpAdapterHost;
     const ctx = host.switchToHttp();
-    const request = ctx.getRequest<unknown>();
-    const response = ctx.getRequest<unknown>();
+    const request = ctx.getRequest<Request>();
+    const response = ctx.getResponse<Response>();
 
     const url = httpAdapter.getRequestUrl(request);
     const method = httpAdapter.getRequestMethod(request);

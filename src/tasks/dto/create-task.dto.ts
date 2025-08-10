@@ -4,6 +4,8 @@ import {
   IsObject,
   IsOptional,
   IsBoolean,
+  IsDateString,
+  IsNumber,
 } from 'class-validator';
 
 export class CreateTaskDto {
@@ -12,8 +14,12 @@ export class CreateTaskDto {
   name: string;
 
   @IsString()
-  @IsNotEmpty()
+  @IsOptional()
   cronExpression: string;
+
+  @IsDateString()
+  @IsOptional()
+  executionTime?: string; // We will receive this as a string and convert to Date
 
   @IsString()
   @IsNotEmpty()
@@ -26,4 +32,12 @@ export class CreateTaskDto {
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
+
+  @IsString()
+  @IsOptional()
+  timezone?: string;
+
+  @IsNumber()
+  @IsOptional()
+  priority?: number;
 }
